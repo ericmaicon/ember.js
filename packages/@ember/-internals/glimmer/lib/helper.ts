@@ -2,7 +2,7 @@
 @module @ember/component
 */
 
-import { Factory } from '@ember/-internals/owner';
+import { Factory, Owner, setOwner } from '@ember/-internals/owner';
 import { FrameworkObject } from '@ember/-internals/runtime';
 import { getDebugName, symbol } from '@ember/-internals/utils';
 import { join } from '@ember/runloop';
@@ -36,6 +36,12 @@ export interface HelperInstance<T = unknown> {
 
 export interface SimpleHelper<T = unknown> {
   compute: HelperFunction<T>;
+}
+
+const CLASSIC_HELPER_MANAGERS = new WeakSet();
+
+export function isClassicHelperManager(obj: object) {
+  return CLASSIC_HELPER_MANAGERS.has(obj);
 }
 
 /**
@@ -145,9 +151,20 @@ class ClassicHelperManager implements HelperManager<ClassicHelperStateBucket> {
     hasDestroyable: true,
   });
 
+  constructor(public owner: Owner | undefined) {
+    CLASSIC_HELPER_MANAGERS.add(this);
+  }
+
   createHelper(definition: ClassHelperFactory, args: Arguments) {
+    let ownerInjection;
+
+    if (definition.class === undefined) {
+      ownerInjection = {};
+      setOwner(ownerInjection, this.owner!);
+    }
+
     return {
-      instance: definition.create(),
+      instance: definition.create(ownerInjection),
       args,
     };
   }
@@ -178,9 +195,7 @@ class ClassicHelperManager implements HelperManager<ClassicHelperStateBucket> {
   }
 }
 
-export const CLASSIC_HELPER_MANAGER = new ClassicHelperManager();
-
-setHelperManager(() => CLASSIC_HELPER_MANAGER, Helper);
+setHelperManager(owner => new ClassicHelperManager(owner), Helper);
 
 ///////////
 

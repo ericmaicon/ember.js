@@ -1,8 +1,19 @@
+import { getOwner } from '@ember/-internals/owner';
 import { assert } from '@ember/debug';
 import { DEBUG } from '@glimmer/env';
 import { Arguments, Helper as GlimmerHelper } from '@glimmer/interfaces';
 import { createComputeRef, UNDEFINED_REFERENCE } from '@glimmer/reference';
+import {
+  associateDestroyableChild,
+  EMPTY_ARGS,
+  EMPTY_NAMED,
+  EMPTY_POSITIONAL,
+  isDestroyed,
+  isDestroying,
+} from '@glimmer/runtime';
+import { Cache, createCache, getValue } from '@glimmer/validator';
 import { argsProxyFor } from '../utils/args-proxy';
+import { getHelperManager } from '../utils/managers';
 
 export type HelperDefinition = object;
 
@@ -62,12 +73,91 @@ function hasDestroyable(manager: HelperManager): manager is HelperManagerWithDes
   return manager.capabilities.hasDestroyable;
 }
 
+let ARGS_CACHES = DEBUG ? new WeakMap<SimpleArgsProxy, Cache<Partial<Arguments>>>() : undefined;
+
+function getArgs(proxy: SimpleArgsProxy): Partial<Arguments> {
+  return getValue(DEBUG ? ARGS_CACHES!.get(proxy)! : proxy.argsCache!)!;
+}
+
+class SimpleArgsProxy {
+  argsCache?: Cache<Partial<Arguments>>;
+
+  constructor(
+    context: object,
+    computeArgs: (context: object) => Partial<Arguments> = () => EMPTY_ARGS
+  ) {
+    let argsCache = createCache(() => computeArgs(context));
+
+    if (DEBUG) {
+      ARGS_CACHES!.set(this, argsCache);
+    } else {
+      this.argsCache = argsCache;
+    }
+  }
+
+  get named() {
+    return getArgs(this).named || EMPTY_NAMED;
+  }
+
+  get positional() {
+    return getArgs(this).positional || EMPTY_POSITIONAL;
+  }
+}
+
+export function invokeHelper(
+  context: object,
+  definition: HelperDefinition,
+  computeArgs: (context: object) => Partial<Arguments>
+): Cache<unknown> {
+  assert(
+    `Expected a context object to be passed as the first parameter to invokeHelper, got ${context}`,
+    context !== null && typeof context === 'object'
+  );
+
+  const owner = getOwner(context);
+  const manager = getHelperManager(owner, definition)!;
+
+  // TODO: figure out why assert isn't using the TS assert thing
+  assert(
+    `Expected a helper definition to be passed as the second parameter to invokeHelper, but no helper manager was found. Did you use setHelperManager to associate a helper manager?`,
+    manager
+  );
+
+  let args = new SimpleArgsProxy(context, computeArgs);
+  let helper = manager.createHelper(definition, args);
+
+  let cache: Cache<unknown>;
+
+  if (hasValue(manager)) {
+    cache = createCache(() => {
+      assert(
+        `You attempted to get the value of a helper after the helper was destroyed, which is not allowed`,
+        !isDestroying(cache) && !isDestroyed(cache)
+      );
+
+      return manager.getValue(helper);
+    });
+  } else {
+    throw new Error('TODO: unreachable, to be implemented with hasScheduledEffect');
+  }
+
+  if (hasDestroyable(manager)) {
+    let destroyable = manager.getDestroyable(helper);
+
+    associateDestroyableChild(context, cache);
+    associateDestroyableChild(cache, destroyable);
+  }
+
+  return cache;
+}
+
 export default function customHelper(
   manager: HelperManager<unknown>,
   definition: HelperDefinition
 ): GlimmerHelper {
-  return (args, vm) => {
-    const bucket = manager.createHelper(definition, argsProxyFor(args.capture(), 'helper'));
+  return (vmArgs, vm) => {
+    const args = argsProxyFor(vmArgs.capture(), 'helper');
+    const bucket = manager.createHelper(definition, args);
 
     if (hasDestroyable(manager)) {
       vm.associateDestroyable(manager.getDestroyable(bucket));
